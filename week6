@@ -1,0 +1,489 @@
+
+"""
+IDX Exchange - Week 6
+Feature Engineering and Market Metrics
+
+Outputs:
+1. Engineered property-level dataset
+2. Sample output with engineered columns
+3. Segmented market summaries
+4. Data quality validation report
+"""
+
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+
+# ==========================================
+# 1. Configuration and inputs
+# ==========================================
+
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+DATA_DIR = Path
+BASE_DIR = DATA_DIR / "weeks4_5_output"
+OUTPUT_DIR = DATA_DIR / "week6_output"
+
+INPUT_FILE = BASE_DIR / "sold" / "cleaned_residential.csv"
+
+SCHOOL_FILE = (
+    DATA_DIR / "DistrictAreas2425" / "DistrictAreas2425.shp"
+)
+
+required_files = [
+    INPUT_FILE,
+    SCHOOL_FILE,
+    SCHOOL_FILE.with_suffix(".shx"),
+    SCHOOL_FILE.with_suffix(".dbf"),
+    SCHOOL_FILE.with_suffix(".prj"),
+]
+
+missing_files = [str(p) for p in required_files if not p.is_file()]
+
+if missing_files:
+    raise FileNotFoundError(
+        "Missing input files:\n" + "\n".join(missing_files)
+    )
+
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+df = pd.read_csv(
+    INPUT_FILE,
+    encoding="utf-8-sig",
+    dtype={
+        "ListingId": "string",
+        "ListingKey": "string",
+        "PostalCode": "string",
+    },
+    low_memory=False,
+)
+
+print("Sold input:", INPUT_FILE)
+print("School district input:", SCHOOL_FILE)
+print("Output folder:", OUTPUT_DIR)
+print("Original rows:", len(df))
+print("Original columns:", len(df.columns))
+
+
+
+# ==========================================
+# 2. Validate required columns
+# ==========================================
+
+required = [
+    "ClosePrice",
+    "OriginalListPrice",
+    "LivingArea",
+    "DaysOnMarket",
+    "CloseDate",
+    "PurchaseContractDate",
+    "ListingContractDate"
+]
+
+missing = [c for c in required if c not in df.columns]
+
+if missing:
+    raise KeyError(f"Missing required columns: {missing}")
+
+
+# ==========================================
+# 3. Convert numeric columns
+# ==========================================
+
+numeric_cols = [
+    "ClosePrice",
+    "OriginalListPrice",
+    "LivingArea",
+    "DaysOnMarket"
+]
+
+for col in numeric_cols:
+    values = (
+        df[col]
+        .astype("string")
+        .str.replace(r"[$,]", "", regex=True)
+        .str.strip()
+    )
+
+    df[col] = pd.to_numeric(values, errors="coerce")
+
+
+# ==========================================
+# 4. Price Ratio
+# ClosePrice / OriginalListPrice
+# ==========================================
+
+valid_original_price = df["OriginalListPrice"].where(
+    df["OriginalListPrice"] > 0
+)
+
+df["PriceRatio"] = (
+    df["ClosePrice"] / valid_original_price
+)
+
+
+# ==========================================
+# 5. Price Per Square Foot
+# ClosePrice / LivingArea
+# ==========================================
+
+valid_area = df["LivingArea"].where(
+    df["LivingArea"] > 0
+)
+
+df["PricePerSqFt"] = (
+    df["ClosePrice"] / valid_area
+)
+
+
+# ==========================================
+# 6. Close to Original List Ratio
+# ==========================================
+
+df["CloseToOriginalListRatio"] = (
+    df["ClosePrice"] / valid_original_price
+)
+
+
+# ==========================================
+# 7. Parse date columns
+# ==========================================
+
+date_cols = [
+    "CloseDate",
+    "PurchaseContractDate",
+    "ListingContractDate"
+]
+
+for col in date_cols:
+    df[col] = pd.to_datetime(
+        df[col],
+        errors="coerce",
+        format="mixed",
+        utc=True
+    )
+
+
+# ==========================================
+# 8. Year, Month, YrMo
+# ==========================================
+
+df["Year"] = df["CloseDate"].dt.year.astype("Int64")
+
+df["Month"] = df["CloseDate"].dt.month.astype("Int64")
+
+df["YrMo"] = df["CloseDate"].dt.strftime("%Y-%m")
+
+
+# ==========================================
+# 9. Listing to Contract Days
+# ==========================================
+
+df["ListingToContractDays"] = (
+    df["PurchaseContractDate"]
+    - df["ListingContractDate"]
+).dt.days
+
+
+# ==========================================
+# 10. Contract to Close Days
+# ==========================================
+
+df["ContractToCloseDays"] = (
+    df["CloseDate"]
+    - df["PurchaseContractDate"]
+).dt.days
+
+
+# ==========================================
+# 11. Days on Market
+# Retain original DaysOnMarket field
+# ==========================================
+
+# DaysOnMarket was converted to numeric in step 3.
+# No additional calculation is required.
+
+
+# ==========================================
+# 12. Validate engineered features
+# ==========================================
+
+features = [
+    "PriceRatio",
+    "PricePerSqFt",
+    "DaysOnMarket",
+    "Year",
+    "Month",
+    "YrMo",
+    "CloseToOriginalListRatio",
+    "ListingToContractDays",
+    "ContractToCloseDays"
+]
+
+quality = pd.DataFrame({
+    "Feature": features,
+    "NonNullCount": [
+        df[c].notna().sum() for c in features
+    ],
+    "NullCount": [
+        df[c].isna().sum() for c in features
+    ],
+    "NullPercentage": [
+        round(df[c].isna().mean() * 100, 2)
+        for c in features
+    ]
+})
+
+quality.to_csv(
+    OUTPUT_DIR / "feature_quality_report.csv",
+    index=False
+)
+
+print("\nFEATURE QUALITY REPORT")
+print(quality.to_string(index=False))
+
+print("\nNegative date intervals:")
+for col in [
+    "ListingToContractDays",
+    "ContractToCloseDays"
+]:
+    print(col, (df[col] < 0).sum())
+
+
+# ==========================================
+# 13. Segmented Market Analysis
+# ==========================================
+
+def segment_summary(data, group_col):
+
+    if group_col not in data.columns:
+        print(f"Skipping unavailable field: {group_col}")
+        return
+
+    summary = data.groupby(
+        group_col, dropna=False
+    ).agg(
+        TransactionCount=("ClosePrice", "size"),
+        MedianClosePrice=("ClosePrice", "median"),
+        MeanClosePrice=("ClosePrice", "mean"),
+        MedianPricePerSqFt=("PricePerSqFt", "median"),
+        MeanPriceRatio=("PriceRatio", "mean"),
+        MedianDaysOnMarket=("DaysOnMarket", "median"),
+        MedianListingToContractDays=(
+            "ListingToContractDays", "median"
+        ),
+        MedianContractToCloseDays=(
+            "ContractToCloseDays", "median"
+        )
+    ).reset_index()
+
+    # Counts with valid close price for clarity
+    valid_counts = (
+        data.groupby(group_col, dropna=False)["ClosePrice"]
+        .count()
+        .reset_index(name="ValidClosePriceCount")
+    )
+
+    summary = summary.merge(
+        valid_counts,
+        on=group_col,
+        how="left",
+        validate="one_to_one"
+    )
+
+    summary = summary.sort_values(
+        "TransactionCount",
+        ascending=False
+    )
+
+    filename = f"summary_by_{group_col}.csv"
+
+    summary.to_csv(
+        OUTPUT_DIR / filename,
+        index=False
+    )
+
+    print(f"\nSEGMENT SUMMARY: {group_col}")
+    print(summary.head(10).to_string(index=False))
+
+
+# Group by all requested dimensions
+segment_columns = [
+    "PropertyType",
+    "PropertySubType",
+    "CountyOrParish",
+    "MLSAreaMajor",
+    "ListOfficeName",
+    "BuyerOfficeName"
+]
+
+for col in segment_columns:
+    segment_summary(df, col)
+
+
+# ==========================================
+# School District Spatial Join
+# ==========================================
+
+
+# ==========================================
+# Week 6 - School District Spatial Join
+# ==========================================
+
+import pandas as pd
+import geopandas as gpd
+from pathlib import Path
+
+DATA_DIR = Path("/Users/yuki/csv")
+OUTPUT_DIR = DATA_DIR / "week6_output"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+SCHOOL_FILE = (
+    DATA_DIR / "DistrictAreas2425" / "DistrictAreas2425.shp"
+)
+
+# df is the engineered Sold dataset from earlier steps.
+# If df no longer exists, reload the saved dataset.
+
+if "df" not in globals():
+    input_file = OUTPUT_DIR / "week6_sold_engineered.csv"
+    df = pd.read_csv(input_file, low_memory=False)
+
+original_rows = len(df)
+
+# 1. Load school district boundaries
+districts = gpd.read_file(SCHOOL_FILE)
+
+districts = districts[
+    ["CDSCode", "DistrictNa", "DistrictTy", "geometry"]
+].copy()
+
+# 2. Convert coordinates to numeric
+for col in ["Latitude", "Longitude"]:
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+valid_coords = (
+    df["Latitude"].between(-90, 90)
+    & df["Longitude"].between(-180, 180)
+)
+
+print("Total properties:", original_rows)
+print("Valid coordinates:", valid_coords.sum())
+
+# 3. Create geographic points
+points = gpd.GeoDataFrame(
+    df.loc[valid_coords, ["Latitude", "Longitude"]].copy(),
+    geometry=gpd.points_from_xy(
+        df.loc[valid_coords, "Longitude"],
+        df.loc[valid_coords, "Latitude"]
+    ),
+    crs="EPSG:4326"
+)
+
+# Preserve exact original row identity
+points["_row_id"] = points.index
+
+# 4. Convert district boundaries to same CRS
+districts = districts.to_crs(points.crs)
+
+# 5. Spatial join
+matched = gpd.sjoin(
+    points[["_row_id", "geometry"]],
+    districts,
+    how="left",
+    predicate="intersects"
+)
+
+# 6. Aggregate matches by original row
+# Some properties may intersect more than one district
+# (for example, elementary and high school districts).
+
+def combine_unique(values):
+    unique = sorted(set(values.dropna().astype(str)))
+    return "; ".join(unique) if unique else pd.NA
+
+school_results = matched.groupby("_row_id").agg(
+    SchoolDistrict=("DistrictNa", combine_unique),
+    SchoolDistrictType=("DistrictTy", combine_unique),
+    SchoolDistrictCode=("CDSCode", combine_unique)
+)
+
+# 7. Add district columns without changing row count
+for col in [
+    "SchoolDistrict",
+    "SchoolDistrictType",
+    "SchoolDistrictCode"
+]:
+    df[col] = df.index.map(school_results[col])
+
+# 8. Validate results
+assert len(df) == original_rows, (
+    "ERROR: Property row count changed"
+)
+
+matched_count = df["SchoolDistrict"].notna().sum()
+
+print("\n===== SCHOOL DISTRICT VALIDATION =====")
+print("Total properties:", len(df))
+print("Matched properties:", matched_count)
+print("Unmatched properties:", len(df) - matched_count)
+print("Match rate:", round(matched_count / len(df) * 100, 2), "%")
+
+# 9. Preview results
+preview_cols = [
+    "Latitude",
+    "Longitude",
+    "SchoolDistrict",
+    "SchoolDistrictType",
+    "SchoolDistrictCode"
+]
+
+display(df[preview_cols].head(10))
+
+# 10. Save complete dataset
+output_file = OUTPUT_DIR / "week6_sold_engineered.csv"
+
+df.to_csv(output_file, index=False)
+
+print("\nSaved:", output_file)
+
+
+# ==========================================
+# 14. Create sample output table
+# ==========================================
+
+id_cols = [
+    c for c in ["ListingId", "PropertyType", "CountyOrParish"]
+    if c in df.columns
+]
+
+sample_cols = id_cols + [
+    "ClosePrice",
+    "OriginalListPrice",
+    "LivingArea"
+] + features
+
+sample = df[sample_cols].head(20)
+
+sample.to_csv(
+    OUTPUT_DIR / "week6_sample_output.csv",
+    index=False
+)
+
+print("\nENGINEERED FEATURES PREVIEW")
+print(sample.head(10).to_string(index=False))
+
+
+# ==========================================
+# 15. Save complete engineered dataset
+# ==========================================
+
+output_file = OUTPUT_DIR / "week6_sold_engineered.csv"
+
+df.to_csv(output_file, index=False)
+
+print("\nWeek 6 feature engineering completed.")
+print("Output saved to:", output_file)
